@@ -42,12 +42,11 @@ func teeConn(reqConn *net.TCPConn) {
 	buf := &bytes.Buffer{}
 	readToBuffer(reqConn, buf)
 
-	log.Printf("Bytes read %v", hex.Dump(buf.Bytes()))
+	log.Printf("Read from requester: \n%v", hex.Dump(buf.Bytes()))
 
 	// write to responder
 	if _, err := resConn.Write(buf.Bytes()); err != nil {
-		log.Printf("Failed to write to responder with err: %v", err)
-		panic(err)
+		log.Panicf("Failed to write to responder with err: %v", err)
 	}
 
 	fBytes := make([]byte, buf.Len())
@@ -58,10 +57,11 @@ func teeConn(reqConn *net.TCPConn) {
 	buf.Reset()
 	readToBuffer(resConn, buf)
 
+	log.Printf("Received from responder: \n%v", hex.Dump(buf.Bytes()))
+
 	// send responder bytes to requester
 	if _, err := reqConn.Write(buf.Bytes()); err != nil {
-		log.Printf("Failed to write to requester with err: %v", err)
-		panic(err)
+		log.Panicf("Failed to write to requester with err: %v", err)
 	}
 }
 
@@ -71,10 +71,8 @@ func readToBuffer(conn *net.TCPConn, buf *bytes.Buffer) {
 		n, err := conn.Read(data)
 		if err != nil {
 			if err != io.EOF {
-				log.Printf("Failed to read from TCPConn with err: %v", err)
-				panic(err)
+				log.Panicf("Failed to read from TCPConn with err: %v", err)
 			} else {
-				log.Printf("EOF err: %v", err)
 				break
 			}
 		}
@@ -89,8 +87,6 @@ func forwardBytes(out []byte) {
 	conn, _ := makeTCPConn(*forwardAddr)
 	defer conn.Close()
 
-	log.Printf("Forwarding: %v", hex.Dump(out))
-
 	conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
 	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 
@@ -100,14 +96,18 @@ func forwardBytes(out []byte) {
 		return
 	}
 
+	log.Printf("Forwarded: \n%v", hex.Dump(out))
+
 	// throw away response from forward receiver
 	data := make([]byte, 1024)
-	_, err := conn.Read(data)
-	if err != nil {
-		if err != io.EOF {
-			log.Printf("Reading from forward address failed with err: %v", err)
-		} else {
-			log.Printf("EOF err: %v", err)
+	for {
+		_, err := conn.Read(data)
+		if err != nil {
+			if err != io.EOF {
+				log.Printf("Reading from forward address failed with err: %v", err)
+			} else {
+				break
+			}
 		}
 	}
 }
@@ -130,11 +130,11 @@ func main() {
 	// setup listener
 	addr, err := net.ResolveTCPAddr("tcp", *listenAddr)
 	if err != nil {
-		panic(err)
+		log.Panicf("Resolving listen address failed with err: %v", err)
 	}
 	listener, err := net.ListenTCP("tcp", addr)
 	if err != nil {
-		panic(err)
+		log.Panicf("Listen failed with err: %v", err)
 	}
 
 	incoming := make(chan *net.TCPConn)
@@ -151,8 +151,7 @@ func main() {
 	for {
 		conn, err := listener.AcceptTCP()
 		if err != nil {
-			log.Printf("Accept incoming failed with err: %v", err)
-			panic(err)
+			log.Panicf("Accept incoming failed with err: %v", err)
 		}
 		incoming <- conn
 	}
