@@ -105,6 +105,7 @@ func forwardBytes(out []byte) {
 		if err != nil {
 			if err != io.EOF {
 				log.Printf("Reading from forward address failed with err: %v", err)
+				break
 			} else {
 				break
 			}
