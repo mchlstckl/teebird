@@ -87,10 +87,8 @@ func forwardBytes(out []byte) {
 	conn, _ := makeTCPConn(*forwardAddr)
 	defer conn.Close()
 
-	conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
-	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
-
 	// write to forward
+	conn.SetWriteDeadline(time.Now().Add(100 * time.Millisecond))
 	if _, err := conn.Write(out); err != nil {
 		log.Printf("Forwarding failed with err: %v", err)
 		return
@@ -99,6 +97,7 @@ func forwardBytes(out []byte) {
 	log.Printf("Forwarded: \n%v", hex.Dump(out))
 
 	// throw away response from forward receiver
+	conn.SetReadDeadline(time.Now().Add(5 * time.Millisecond))
 	data := make([]byte, 1024)
 	for {
 		_, err := conn.Read(data)
