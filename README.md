@@ -16,7 +16,7 @@ Setup netcat to listen to `localhost:8082`
 
 	nc -lk 8082
 
-Start your tomcat service on `localhost:8080`
+Start your service (e.g. tomcat) on `localhost:8080`
 
 	service tomcat start
 
