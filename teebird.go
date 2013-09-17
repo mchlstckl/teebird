@@ -11,23 +11,23 @@ import (
 	"net"
 	"os"
 	"runtime"
-	// "time"
+	"time"
 )
 
 var (
-	listenAddr        *string = flag.String("l", "localhost:8081", "listen address")
-	responderAddr     *string = flag.String("r", "localhost:8080", "responder address")
-	forwardAddr       *string = flag.String("f", "localhost:8082", "forwarding address")
-	writeFiles        *bool   = flag.Bool("w", true, "write files")
-	responderStopOnRN *bool   = flag.Bool("x", true, "responder use \\r\\n as stop")
+	listenAddr        *string = flag.String("l", "localhost:8081", `listening address`)
+	responderAddr     *string = flag.String("r", "localhost:8080", `responder address`)
+	forwardAddr       *string = flag.String("f", "localhost:8082", `forwarder address`)
+	writeFiles        *bool   = flag.Bool("w", true, `write files`)
+	responderStopOnRN *bool   = flag.Bool("x", true, `responder use \r\n as stop`)
+	iniWriter         *bufio.Writer
+	resWriter         *bufio.Writer
+	fwdWriter         *bufio.Writer
 )
 
-type byteChanWriter chan<- []byte
-
-func (w byteChanWriter) Write(p []byte) (int, error) {
-	w <- p
-	return len(p), nil
-}
+const (
+	bufferSize = 256
+)
 
 func closeConn(completed <-chan *net.TCPConn) {
 	for conn := range completed {
@@ -43,90 +43,113 @@ func makeTCPConn(addr string) (*net.TCPConn, error) {
 	return net.DialTCP("tcp", nil, tcpAddr)
 }
 
-func teeConn(reqConn *net.TCPConn) {
-	reqChan := make(chan []byte)
-	resChan := make(chan []byte)
-	fwdChan := make(chan []byte)
+func teeConn(iniConn *net.TCPConn) {
+	upstream := make(chan []byte)
+	downstream := make(chan []byte)
 
-	log.Printf("req %v", reqConn)
+	resConn, err := makeTCPConn(*responderAddr)
+	if err != nil {
+		log.Panicf("Failed to create TCP conn, err: ", err)
+	}
+	defer resConn.Close()
 
-	go fanOut(reqChan, resChan, fwdChan)
-	go forwardFlow(fwdChan)
-	go handleRequestor(reqChan, reqConn)
+	fwdConn, err := makeTCPConn(*forwardAddr)
+	if err != nil {
+		log.Printf("Failed to create TCP conn, err: ", err)
+	}
+	defer fwdConn.Close()
 
-	responderFlow(resChan, reqConn)
+	log.Printf("ini %v", iniConn)
+	log.Printf("res %v", resConn)
+	log.Printf("fwd %v", fwdConn)
+
+	go writeDownstream(resConn, fwdConn, downstream)
+	go writeInitiator(iniConn, upstream)
+
+	go readForwarder(fwdConn)
+	go readResponder(upstream, resConn)
+
+	readInitiator(downstream, iniConn)
 }
 
-func responderFlow(readChan <-chan []byte, reqConn *net.TCPConn) {
-	conn, err := makeTCPConn(*responderAddr)
-	if err != nil {
-		panic(err)
-	}
-	defer conn.Close()
-
-	log.Printf("res %v", conn)
-
-	writeConnFromChan(conn, readChan, true)
-
-	if *writeFiles {
-		fo, err := os.OpenFile("responder.log", os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
-		if err != nil {
-			panic(err)
+func readInitiator(downstream chan<- []byte, conn *net.TCPConn) {
+	writer := iniWriter
+	readConnFunc(conn, false, func(data []byte) {
+		downstream <- data
+		if writer != nil {
+			writer.Write(data)
 		}
-		defer fo.Close()
-
-		writer := bufio.NewWriter(fo)
-
-		readConnToWriters(conn, *responderStopOnRN, reqConn, writer)
-
-		log.Printf("time to flush res")
-
-		if err = writer.Flush(); err != nil {
-			log.Printf("Failed to flush %v, err: %v", writer, err)
-		}
-	} else {
-		readConnToWriters(conn, *responderStopOnRN, reqConn)
+	})
+	if writer != nil {
+		time.AfterFunc(5*time.Second, func() {
+			writer.Flush()
+		})
 	}
 }
 
-func forwardFlow(readChan <-chan []byte) {
-	conn, err := makeTCPConn(*forwardAddr)
+func readResponder(upstream chan<- []byte, conn *net.TCPConn) {
+	writer := resWriter
+	readConnFunc(conn, *responderStopOnRN, func(data []byte) {
+		upstream <- data
+		if writer != nil {
+			writer.Write(data)
+		}
+	})
+	if writer != nil {
+		time.AfterFunc(5*time.Second, func() {
+			writer.Flush()
+		})
+	}
+}
+
+func readForwarder(conn *net.TCPConn) {
+	// conn.SetReadDeadline(time.Now().Add(1000 * time.Millisecond))
+	writer := fwdWriter
+	readConnFunc(conn, *responderStopOnRN, func(data []byte) {
+		if writer != nil {
+			writer.Write(data)
+		}
+	})
+	if writer != nil {
+		time.AfterFunc(5*time.Second, func() {
+			writer.Flush()
+		})
+	}
+}
+
+func writeDownstream(resConn *net.TCPConn, fwdConn *net.TCPConn, downstream <-chan []byte) {
+	// fwdConn.SetWriteDeadline(time.Now().Add(1000 * time.Millisecond))
+	for data := range downstream {
+		if _, err := resConn.Write(data); err != nil {
+			log.Panicf("Failed to stream to conn, err:", err)
+		}
+		if _, err := fwdConn.Write(data); err != nil {
+			log.Printf("Failed to stream to conn, err:", err)
+		}
+	}
+}
+
+func writeInitiator(conn *net.TCPConn, upstream <-chan []byte) {
+	for data := range upstream {
+		if _, err := conn.Write(data); err != nil {
+			log.Panicf("Failed to stream to conn, err:", err)
+		}
+	}
+}
+
+func newFileAndWriter(filename string) (*os.File, *bufio.Writer, error) {
+	fo, err := os.OpenFile(filename, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
 	if err != nil {
-		panic(err)
+		return nil, nil, err
 	}
-	defer conn.Close()
-
-	log.Printf("fwd %v", conn)
-
-	// conn.SetWriteDeadline(time.Now().Add(1000 * time.Millisecond))
-	writeConnFromChan(conn, readChan, false)
-
-	if *writeFiles {
-		fo, err := os.OpenFile("forward.log", os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
-		if err != nil {
-			panic(err)
-		}
-		defer fo.Close()
-
-		writer := bufio.NewWriter(fo)
-
-		// conn.SetReadDeadline(time.Now().Add(1000 * time.Millisecond))
-		readConnToWriters(conn, *responderStopOnRN, writer)
-
-		log.Printf("time to flush fwd")
-
-		if err = writer.Flush(); err != nil {
-			log.Printf("Failed to flush %v, err: %v", writer, err)
-		}
-	} else {
-		readConnToWriters(conn, *responderStopOnRN)
-	}
+	writer := bufio.NewWriter(fo)
+	return fo, writer, nil
 }
 
 func readConnFunc(conn *net.TCPConn, stopOnRN bool, fn func([]byte)) {
-	data := make([]byte, 256)
+	buffer := make([]byte, bufferSize)
 	for {
-		n, err := conn.Read(data)
+		n, err := conn.Read(buffer)
 		if err != nil {
 			if err != io.EOF {
 				log.Printf("Failed to read %v from TCPConn with err: %v", conn, err)
@@ -140,7 +163,7 @@ func readConnFunc(conn *net.TCPConn, stopOnRN bool, fn func([]byte)) {
 		}
 
 		fnData := make([]byte, n)
-		copy(fnData, data[:n])
+		copy(fnData, buffer[:n])
 		fn(fnData[:n])
 
 		if err == io.EOF {
@@ -148,69 +171,13 @@ func readConnFunc(conn *net.TCPConn, stopOnRN bool, fn func([]byte)) {
 			break
 		}
 
-		if stopOnRN && data[n-2] == '\r' && data[n-1] == '\n' {
+		if stopOnRN && buffer[n-2] == '\r' && buffer[n-1] == '\n' {
 			log.Printf("broke using islast")
 			break
 		}
 	}
 
 	log.Printf("finished reading from %v", conn)
-}
-
-func readConnToWriters(srcConn *net.TCPConn, stopOnRN bool, writers ...io.Writer) {
-	readConnFunc(srcConn, stopOnRN, func(data []byte) {
-		for _, writer := range writers {
-			writer.Write(data)
-		}
-	})
-}
-
-func handleRequestor(stream chan<- []byte, conn *net.TCPConn) {
-	chanWriter := byteChanWriter(stream)
-	if *writeFiles {
-		fo, err := os.OpenFile("request.log", os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
-		if err != nil {
-			panic(err)
-		}
-		defer fo.Close()
-
-		writer := bufio.NewWriter(fo)
-
-		readConnToWriters(conn, true, chanWriter, writer)
-
-		log.Printf("Done reading %v, closing stream", conn)
-
-		if err = writer.Flush(); err != nil {
-			log.Printf("Failed to flush %v, err: %v", writer, err)
-		}
-	} else {
-		readConnToWriters(conn, true, chanWriter)
-	}
-	close(stream)
-}
-
-func fanOut(in <-chan []byte, outs ...chan<- []byte) {
-	for data := range in {
-		for _, out := range outs {
-			out <- data
-		}
-	}
-
-	log.Printf("Closing fan-out channs")
-
-	for _, out := range outs {
-		close(out)
-	}
-}
-
-func writeConnFromChan(conn *net.TCPConn, stream <-chan []byte, panicOnErr bool) {
-	log.Printf("Entering conn.write")
-	for data := range stream {
-		if _, err := conn.Write(data); err != nil && panicOnErr {
-			log.Panicf("Failed to stream to conn, err:", err)
-		}
-	}
-	log.Printf("Exiting conn.write")
 }
 
 func handleIncoming(incoming <-chan *net.TCPConn, completed chan<- *net.TCPConn) {
@@ -221,12 +188,32 @@ func handleIncoming(incoming <-chan *net.TCPConn, completed chan<- *net.TCPConn)
 }
 
 func main() {
-
 	flag.Parse()
 
 	fmt.Printf("Listening: %v\n", *listenAddr)
 	fmt.Printf("Responder: %v\n", *responderAddr)
-	fmt.Printf("Forward: %v\n", *forwardAddr)
+	fmt.Printf("Forwarder: %v\n", *forwardAddr)
+
+	if *writeFiles {
+		rf, rw, err := newFileAndWriter("responder.log")
+		if err != nil {
+			log.Panicf("Failed to create file, err", err)
+		}
+		resWriter = rw
+		defer rf.Close()
+		ff, fw, err := newFileAndWriter("forwarder.log")
+		if err != nil {
+			log.Panicf("Failed to create file, err", err)
+		}
+		fwdWriter = fw
+		defer ff.Close()
+		lf, lw, err := newFileAndWriter("listener.log")
+		if err != nil {
+			log.Panicf("Failed to create file, err", err)
+		}
+		iniWriter = lw
+		defer lf.Close()
+	}
 
 	// setup listener
 	addr, err := net.ResolveTCPAddr("tcp", *listenAddr)
