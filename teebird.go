@@ -2,8 +2,6 @@ package main
 
 import (
 	"bufio"
-	// "bytes"
-	// "encoding/hex"
 	"flag"
 	"fmt"
 	"io"
@@ -19,7 +17,7 @@ var (
 	responderAddr     *string = flag.String("r", "localhost:8080", `responder address`)
 	forwardAddr       *string = flag.String("f", "localhost:8082", `forwarder address`)
 	writeFiles        *bool   = flag.Bool("w", true, `write files`)
-	responderStopOnRN *bool   = flag.Bool("x", true, `responder use \r\n as stop`)
+	responderStopOnRN *bool   = flag.Bool("x", true, `responder uses \r\n as stop`)
 	iniWriter         *bufio.Writer
 	resWriter         *bufio.Writer
 	fwdWriter         *bufio.Writer
@@ -49,13 +47,13 @@ func teeConn(iniConn *net.TCPConn) {
 
 	resConn, err := makeTCPConn(*responderAddr)
 	if err != nil {
-		log.Panicf("Failed to create TCP conn, err: ", err)
+		log.Panicf("Failed to create responder TCP conn, err: ", err)
 	}
 	defer resConn.Close()
 
 	fwdConn, err := makeTCPConn(*forwardAddr)
 	if err != nil {
-		log.Printf("Failed to create TCP conn, err: ", err)
+		log.Printf("Failed to create forwarder TCP conn, err: ", err)
 	}
 	defer fwdConn.Close()
 
@@ -121,10 +119,10 @@ func writeDownstream(resConn *net.TCPConn, fwdConn *net.TCPConn, downstream <-ch
 	// fwdConn.SetWriteDeadline(time.Now().Add(1000 * time.Millisecond))
 	for data := range downstream {
 		if _, err := resConn.Write(data); err != nil {
-			log.Panicf("Failed to stream to conn, err:", err)
+			log.Panicf("Failed to stream to responder conn, err:", err)
 		}
 		if _, err := fwdConn.Write(data); err != nil {
-			log.Printf("Failed to stream to conn, err:", err)
+			log.Printf("Failed to stream to forward conn, err:", err)
 		}
 	}
 }
@@ -132,7 +130,7 @@ func writeDownstream(resConn *net.TCPConn, fwdConn *net.TCPConn, downstream <-ch
 func writeInitiator(conn *net.TCPConn, upstream <-chan []byte) {
 	for data := range upstream {
 		if _, err := conn.Write(data); err != nil {
-			log.Panicf("Failed to stream to conn, err:", err)
+			log.Panicf("Failed to stream to initiator conn, err:", err)
 		}
 	}
 }
@@ -172,7 +170,7 @@ func readConnFunc(conn *net.TCPConn, stopOnRN bool, fn func([]byte)) {
 		}
 
 		if stopOnRN && buffer[n-2] == '\r' && buffer[n-1] == '\n' {
-			log.Printf("broke using islast")
+			log.Printf("stop reading conn, stop on rn: %v", conn)
 			break
 		}
 	}
@@ -197,19 +195,19 @@ func main() {
 	if *writeFiles {
 		rf, rw, err := newFileAndWriter("responder.log")
 		if err != nil {
-			log.Panicf("Failed to create file, err", err)
+			log.Panicf("Failed to create responder.log file, err", err)
 		}
 		resWriter = rw
 		defer rf.Close()
 		ff, fw, err := newFileAndWriter("forwarder.log")
 		if err != nil {
-			log.Panicf("Failed to create file, err", err)
+			log.Panicf("Failed to create forwarder.log file, err", err)
 		}
 		fwdWriter = fw
 		defer ff.Close()
 		lf, lw, err := newFileAndWriter("listener.log")
 		if err != nil {
-			log.Panicf("Failed to create file, err", err)
+			log.Panicf("Failed to create listener.log file, err", err)
 		}
 		iniWriter = lw
 		defer lf.Close()
@@ -218,11 +216,11 @@ func main() {
 	// setup listener
 	addr, err := net.ResolveTCPAddr("tcp", *listenAddr)
 	if err != nil {
-		log.Panicf("Resolving listen address failed with err: %v", err)
+		log.Panicf("Failed to resolve listen address, err: %v", err)
 	}
 	listener, err := net.ListenTCP("tcp", addr)
 	if err != nil {
-		log.Panicf("Listen failed with err: %v", err)
+		log.Panicf("Listen failed, err: %v", err)
 	}
 
 	incoming := make(chan *net.TCPConn)
@@ -239,7 +237,7 @@ func main() {
 	for {
 		conn, err := listener.AcceptTCP()
 		if err != nil {
-			log.Panicf("Accept incoming failed with err: %v", err)
+			log.Panicf("Accept incoming failed, err: %v", err)
 		}
 		incoming <- conn
 	}
