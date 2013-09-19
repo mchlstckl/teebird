@@ -2,7 +2,11 @@
 
 Tee for TCP traffic
 
-	./teebird -l <listen address> -r <responder address> -f <forward address> -x=<responder uses RN as stop> -w=<write files>
+	./teebird -l <listen address> \
+		-r <responder address> \
+		-f <forward address> \
+		-x=<responder uses RN as stop> \
+		-w=<write files>
 
 ##Options
 
